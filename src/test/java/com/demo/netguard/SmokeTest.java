@@ -59,6 +59,7 @@ public final class SmokeTest {
             check(!text.contains("secret-path")&&!text.contains("must-not-log"),"paths and query tokens NOT logged");
             check(!text.contains("HISTORICAL_DOMAIN")&&!text.contains("INTRUSION"),"no IDS logic in Phase 1 log");
             check(request(admin,"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").contains("ok"),"dashboard health endpoint");
+            check(request(admin,"GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").contains("\"storage\":\"ok\""),"dashboard reports storage ok");
             ExecutorService jobs=Executors.newFixedThreadPool(6);
             try{
                 List<Future<String>> results=new ArrayList<>();
