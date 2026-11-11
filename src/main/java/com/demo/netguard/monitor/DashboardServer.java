@@ -49,7 +49,8 @@ public final class DashboardServer implements AutoCloseable {
         <title>NetProxy Phase 1 — Activity Viewer</title>
         <style>body{font:15px system-ui;background:#0f172a;color:#f8fafc;max-width:1050px;margin:30px auto;padding:0 16px}
         h1{font-size:25px}section{background:#1e293b;padding:17px;border-radius:10px;margin:16px 0}
-        label{margin-right:12px}input{background:#0f172a;color:#fff;border:1px solid #64748b;border-radius:5px;padding:7px}
+        label{display:inline-block;margin:0 12px 8px 0}input,select{background:#0f172a;color:#fff;border:1px solid #64748b;border-radius:5px;padding:7px;font:inherit}
+        select{color-scheme:dark}input:focus-visible,select:focus-visible{outline:2px solid #38bdf8;outline-offset:2px}
         table{border-collapse:collapse;width:100%;font-size:13px}td,th{text-align:left;border-bottom:1px solid #475569;padding:8px}
         .small{color:#cbd5e1;font-size:13px}</style>
         <h1>Java Network Proxy — Phase 1</h1><p>Only proxy metadata is recorded. No IDS or threat classification exists yet.</p>
@@ -57,17 +58,27 @@ public final class DashboardServer implements AutoCloseable {
         <section><h2>Recent proxied connections</h2>
         <label>Client IP <input id="client" placeholder="192.168.1.10"></label>
         <label>Domain <input id="domain" placeholder="example.com"></label>
+        <label>Time range <select id="range"><option value="0">All retained</option><option value="5">Last 5 minutes</option>
+        <option value="60">Last hour</option><option value="1440">Last 24 hours</option></select></label>
         <p class="small">HTTPS CONNECT destination only; no URL paths, credentials or encrypted content.</p>
+        <p class="small" id="shown"></p>
         <table><thead><tr><th>Time</th><th>Client</th><th>Protocol</th><th>Destination</th><th>Outcome</th></tr></thead><tbody id="entries"></tbody></table>
         </section><script>
         function td(row,value){const cell=document.createElement('td');cell.textContent=String(value);row.appendChild(cell)}
-        async function refresh(){try{
-          const params=new URLSearchParams({client:document.getElementById('client').value,domain:document.getElementById('domain').value,limit:'100'});
+        // shortcut: the time range is applied in the browser over the 500 retained events; add a since= param to /api/events if retention grows
+        let latest=0;
+        async function refresh(){const id=++latest;try{
+          const params=new URLSearchParams({client:document.getElementById('client').value,domain:document.getElementById('domain').value,limit:'500'});
           const [summary,events]=await Promise.all([fetch('/api/summary').then(r=>r.json()),fetch('/api/events?'+params).then(r=>r.json())]);
+          if(id!==latest)return;
+          const minutes=Number(document.getElementById('range').value);
+          const rows=minutes?events.filter(e=>Date.parse(e.at)>=Date.now()-minutes*60000):events;
+          document.getElementById('shown').textContent=`Showing ${rows.length} of ${events.length} matching events`;
           document.getElementById('totals').textContent=`Recent: ${summary.recentTotal} | Connected: ${summary.connected} | Failed: ${summary.failed} | Denied by safe-demo rules: ${summary.denied}`;
           const body=document.getElementById('entries');body.replaceChildren();
-          for(const e of events){const tr=document.createElement('tr');[e.at,e.sourceIp,e.protocol,e.destination+':'+e.port,e.outcome].forEach(x=>td(tr,x));body.appendChild(tr)}
+          for(const e of rows){const tr=document.createElement('tr');[e.at,e.sourceIp,e.protocol,e.destination+':'+e.port,e.outcome].forEach(x=>td(tr,x));body.appendChild(tr)}
         }catch(e){document.getElementById('totals').textContent='Dashboard unavailable'}}
+        for(const id of ['client','domain','range'])document.getElementById(id).addEventListener('input',refresh);
         refresh();setInterval(refresh,2500);</script></html>
         """;
     public void start(){server.start();}
