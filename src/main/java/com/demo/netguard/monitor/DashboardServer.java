@@ -82,7 +82,7 @@ public final class DashboardServer implements AutoCloseable {
         function emptyRow(body,text){const tr=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=5;cell.className='empty';cell.textContent=text;tr.appendChild(cell);body.appendChild(tr)}
         let latest=0;
         async function refresh(){const id=++latest;try{
-          const params=new URLSearchParams({client:document.getElementById('client').value,domain:document.getElementById('domain').value,limit:'500'});
+          const params=new URLSearchParams({client:document.getElementById('client').value.trim(),domain:document.getElementById('domain').value.trim(),limit:'500'});
           const [summary,events,status]=await Promise.all([get('/api/summary'),get('/api/events?'+params),get('/api/status')]);
           if(id!==latest)return;
           notice(status.storage==='ok'?'':"Can't write to the event log, so new connections may not be recorded. Check disk space and permissions on the data folder.");
