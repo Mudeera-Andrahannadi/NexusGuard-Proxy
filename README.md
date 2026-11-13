@@ -247,3 +247,8 @@ Troubleshooting
 - `ForwardProxyServerTest`
 - A request does not appear on the dashboard. Check `NO_PROXY` (see above), that the client IP is on the allowlist in LAN mode, and that the client really uses port 8888.
 - `scripts/test.sh` cannot find a class on Windows. Use `test.ps1`. The shell script uses a `:` classpath separator, which Windows Java does not accept.
+
+
+## contributers
+- FERNANDO A.N.V. EG/2023/5590
+
