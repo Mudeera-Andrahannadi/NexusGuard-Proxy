@@ -14,7 +14,9 @@ import java.util.Objects;
  * protocols are {@code HTTP} and {@code HTTPS_TUNNEL}. Outcomes are {@code CONNECTED},
  * {@code FAILED}, and {@code DENIED}; {@code CONNECTED} means the upstream TCP connection
  * succeeded, not that an HTTP response was successful. A {@code DENIED} outcome represents
- * an operational safety-policy decision, not an intrusion verdict.
+ * an operational safety-policy decision, not an intrusion verdict. The one exception is an
+ * automatic rate-limit block: reason {@code RATE_LIMIT_EXCEEDED}, logged once per block, with
+ * {@code "-"} for method, destination and protocol and port 0 because the request is never read.
  *
  * @param at UTC event timestamp
  * @param sourceIp IP address observed from the client socket connected to the proxy

@@ -2,6 +2,7 @@ package com.demo.netguard.proxy;
 
 import com.demo.netguard.model.FlowEvent;
 import com.demo.netguard.monitor.EventLog;
+import com.demo.netguard.security.ClientGuard;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +29,7 @@ public final class ForwardProxyServer implements AutoCloseable {
     private final Set<String> clientAllowlist;
     private final EventLog log;
     private final int demoPort;
+    private final ClientGuard guard; // null means no rate limiting
     private volatile boolean running;
     private volatile boolean closed;
     private final Set<Socket> clients = ConcurrentHashMap.newKeySet();
@@ -38,9 +40,20 @@ public final class ForwardProxyServer implements AutoCloseable {
         this(port, bindIp, clients, log, demoPort, false);
     }
 
+    /** Same proxy, but clients that open too many connections are blocked for a while. */
+    public ForwardProxyServer(int port, String bindIp, Set<String> clients,
+                              EventLog log, int demoPort, ClientGuard guard) throws IOException {
+        this(port, bindIp, clients, log, demoPort, false, guard);
+    }
+
     /** Allows the request gate to be exercised on loopback without opening a LAN listener. */
     ForwardProxyServer(int port, String bindIp, Set<String> clients,
                        EventLog log, int demoPort, boolean enforceClientAllowlistOnLoopback) throws IOException {
+        this(port, bindIp, clients, log, demoPort, enforceClientAllowlistOnLoopback, null);
+    }
+
+    private ForwardProxyServer(int port, String bindIp, Set<String> clients, EventLog log, int demoPort,
+                               boolean enforceClientAllowlistOnLoopback, ClientGuard guard) throws IOException {
         if (clients == null) throw new IllegalArgumentException("Client allowlist is required");
         InetAddress bind = parseIpv4Literal(bindIp);
         if (bind == null || !(bind.isLoopbackAddress() || isPrivateIpv4(bind)))
@@ -62,7 +75,7 @@ public final class ForwardProxyServer implements AutoCloseable {
         if (lan && this.clientAllowlist.isEmpty()) throw new IllegalArgumentException("LAN proxy requires approved client IPs");
         if (port < 0 || port > 65535) throw new IllegalArgumentException("Proxy port must be between 0 and 65535");
         if (demoPort < 1 || demoPort > 65535) throw new IllegalArgumentException("Demo port must be between 1 and 65535");
-        this.log = log;this.demoPort = demoPort;
+        this.log = log;this.demoPort = demoPort;this.guard = guard;
         listener = new ServerSocket();listener.bind(new InetSocketAddress(bind,port),50);
         acceptor = new Thread(this::accept,"proxy-accept");acceptor.setDaemon(true);
     }
@@ -217,6 +230,19 @@ public final class ForwardProxyServer implements AutoCloseable {
             String source=client.getInetAddress().getHostAddress();
             if(enforceClientAllowlist && !clientAllowlist.contains(source)) {
                 send(out,403,"Forbidden","Client IP not on authorized lab allowlist");return;
+            }
+            if(guard!=null) {
+                ClientGuard.Verdict verdict=guard.check(source);
+                if(verdict!=ClientGuard.Verdict.ALLOWED) {
+                    // Log the block once; logging every refused connection would let a flood push real events out.
+                    if(verdict==ClientGuard.Verdict.JUST_BLOCKED)
+                        log.append(new FlowEvent(Instant.now(),source,"-","-",0,"-","DENIED","RATE_LIMIT_EXCEEDED"));
+                    send(out,429,"Too Many Requests","Too many requests from this address; it is blocked for a while");
+                    // Closing with the request unread would send a TCP reset that can wipe out the reply.
+                    client.setSoTimeout(200);
+                    try {in.read(new byte[MAX_LINE]);} catch(IOException ignored){}
+                    return;
+                }
             }
             String requestLine;
             try {requestLine=line(in);}
