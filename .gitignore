@@ -6,3 +6,5 @@ data/*.jsonl*
 .vscode/
 .DS_Store
 .env
+agent.md
+codex.md
