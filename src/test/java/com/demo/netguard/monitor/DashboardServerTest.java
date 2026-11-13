@@ -1,6 +1,7 @@
 package com.demo.netguard.monitor;
 
 import com.demo.netguard.model.FlowEvent;
+import com.demo.netguard.security.ClientGuard;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -68,6 +69,7 @@ public final class DashboardServerTest {
                 "status recovers once the log can be created again");
 
             check(get(http, dashboard, "/health").body().equals("ok"), "health endpoint answers ok");
+            check(get(http, dashboard, "/api/blocked").body().equals("[]"), "blocked list is empty when rate limiting is off");
             HttpResponse<String> page = get(http, dashboard, "/");
             check(page.headers().firstValue("Cache-Control").orElse("").equals("no-store")
                     && page.headers().firstValue("Content-Security-Policy").orElse("").contains("default-src 'self'"),
@@ -85,6 +87,19 @@ public final class DashboardServerTest {
             check(html.contains("getElementById('client').value.trim()") && html.contains("getElementById('domain').value.trim()"),
                 "page trims filter text so a stray space does not hide every event");
             check(!html.contains("innerHTML"), "page never builds the table with innerHTML");
+        }
+        ClientGuard guard = new ClientGuard(1, 60_000, 90_000);
+        try (DashboardServer dashboard = new DashboardServer(0, log, guard)) {
+            dashboard.start();
+            check(get(http, dashboard, "/api/blocked").body().equals("[]"), "blocked list is empty while nobody is blocked");
+            guard.check("192.168.1.45");
+            guard.check("192.168.1.45");
+            String blocked = get(http, dashboard, "/api/blocked").body();
+            check(blocked.startsWith("[{\"ip\":\"192.168.1.45\",\"remainingSeconds\":") && blocked.endsWith("}]"),
+                "blocked list names the blocked client");
+            String key = "\"remainingSeconds\":";
+            int seconds = Integer.parseInt(blocked.substring(blocked.indexOf(key) + key.length(), blocked.indexOf('}')));
+            check(seconds > 85 && seconds <= 90, "blocked list reports the whole seconds left");
         }
         System.out.println("PASS: " + checks + " DashboardServer checks");
     }

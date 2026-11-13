@@ -24,7 +24,7 @@ public final class NetGuardApp implements AutoCloseable {
         log=new EventLog(events);
         mock=new LocalDemoSite(mockPort);
         proxy=new ForwardProxyServer(proxyPort,bindIp,allowlist,log,mock.port(),guard,scanner);
-        dashboard=new DashboardServer(dashboardPort,log);
+        dashboard=new DashboardServer(dashboardPort,log,guard);
     }
     public void start(){mock.start();proxy.start();dashboard.start();}
     public int proxyPort(){return proxy.port();}

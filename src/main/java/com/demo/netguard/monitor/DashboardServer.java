@@ -1,5 +1,6 @@
 package com.demo.netguard.monitor;
 
+import com.demo.netguard.security.ClientGuard;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpExchange;
 import java.io.IOException;
@@ -15,8 +16,13 @@ import java.util.concurrent.Executors;
 public final class DashboardServer implements AutoCloseable {
     private final HttpServer server;
     private final EventLog log;
+    private final ClientGuard guard; // null when rate limiting is off
     public DashboardServer(int port,EventLog log) throws IOException {
+        this(port,log,null);
+    }
+    public DashboardServer(int port,EventLog log,ClientGuard guard) throws IOException {
         this.log=log;
+        this.guard=guard;
         server=HttpServer.create(new InetSocketAddress("127.0.0.1",port),0);
         server.setExecutor(Executors.newCachedThreadPool(r->{Thread t=new Thread(r,"dashboard");t.setDaemon(true);return t;}));
         server.createContext("/api/events", e -> {
@@ -27,6 +33,7 @@ public final class DashboardServer implements AutoCloseable {
         });
         server.createContext("/api/summary",e->reply(e,200,"application/json",log.summaryJson()));
         server.createContext("/api/status",e->reply(e,200,"application/json",storageStatus()));
+        server.createContext("/api/blocked",e->reply(e,200,"application/json",blockedJson()));
         server.createContext("/health",e->reply(e,200,"text/plain","ok"));
         server.createContext("/",e->reply(e,200,"text/html",PAGE));
     }
@@ -35,6 +42,13 @@ public final class DashboardServer implements AutoCloseable {
         Path file=log.file();
         boolean writable=!Files.isDirectory(file) && (Files.exists(file)?Files.isWritable(file):Files.isWritable(file.getParent()));
         return writable?"{\"storage\":\"ok\"}":"{\"storage\":\"error\"}";
+    }
+    /** Clients the rate limiter is blocking right now, with whole seconds left (rounded up). */
+    private String blockedJson() {
+        if(guard==null)return "[]";
+        StringJoiner json=new StringJoiner(",","[","]");
+        guard.blocked().forEach((ip,millis)->json.add("{\"ip\":\""+ip+"\",\"remainingSeconds\":"+(millis+999)/1000+"}"));
+        return json.toString();
     }
     private static Map<String,String> query(String raw) {
         Map<String,String> m=new HashMap<>();

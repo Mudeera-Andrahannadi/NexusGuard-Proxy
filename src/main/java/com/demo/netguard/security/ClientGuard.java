@@ -49,6 +49,14 @@ public final class ClientGuard {
         this.clockMillis = clockMillis;
     }
 
+    /** Clients blocked right now, mapped to the milliseconds left on each block. A snapshot. */
+    public synchronized Map<String, Long> blocked() {
+        long now = clockMillis.getAsLong();
+        Map<String, Long> result = new HashMap<>();
+        clients.forEach((ip, entry) -> { if (now < entry.blockedUntil) result.put(ip, entry.blockedUntil - now); });
+        return result;
+    }
+
     public synchronized Verdict check(String clientIp) {
         long now = clockMillis.getAsLong();
         Entry entry = clients.computeIfAbsent(clientIp, ip -> new Entry());

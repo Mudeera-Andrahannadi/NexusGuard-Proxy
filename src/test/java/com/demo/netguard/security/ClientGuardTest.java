@@ -8,6 +8,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -48,10 +49,13 @@ public final class ClientGuardTest {
         check(guard.check("10.0.0.1") == Verdict.BLOCKED && guard.check("10.0.0.1") == Verdict.BLOCKED,
             "later requests are refused without announcing the block again");
         check(guard.check("10.0.0.2") == Verdict.ALLOWED, "another client is not affected");
+        check(guard.blocked().equals(Map.of("10.0.0.1", 60_000L)), "blocked() lists only the blocked client and its time left");
 
         now.addAndGet(59_999);
         check(guard.check("10.0.0.1") == Verdict.BLOCKED, "the block holds until the block time has passed");
+        check(guard.blocked().get("10.0.0.1") == 1L, "blocked() counts the time left down");
         now.addAndGet(1);
+        check(guard.blocked().isEmpty(), "blocked() is empty once the block has run out");
         check(guard.check("10.0.0.1") == Verdict.ALLOWED, "the block lifts by itself");
 
         ClientGuard slow = new ClientGuard(3, 10_000, 60_000, now::get);
