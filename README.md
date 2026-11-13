@@ -1,4 +1,4 @@
-# NetProxy Logger
+# NexusGuard Proxy
 Team Members:
 * Dev 1 (Forward Proxy):** Vidasun Fernando
 * Dev 2 (Event Logging):** Pramith Vidanapathirana

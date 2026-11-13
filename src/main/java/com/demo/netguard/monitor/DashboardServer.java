@@ -55,7 +55,7 @@ public final class DashboardServer implements AutoCloseable {
     }
     private static final String PAGE="""
         <!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-        <title>NetProxy Phase 1 — Activity Viewer</title>
+        <title>NexusGuard Proxy</title>
         <style>body{font:15px system-ui;background:#0f172a;color:#f8fafc;max-width:1050px;margin:30px auto;padding:0 16px}
         h1{font-size:25px}section{background:#1e293b;padding:17px;border-radius:10px;margin:16px 0}
         label{display:inline-block;margin:0 12px 8px 0}input,select{background:#0f172a;color:#fff;border:1px solid #64748b;border-radius:5px;padding:7px;font:inherit}
@@ -63,7 +63,7 @@ public final class DashboardServer implements AutoCloseable {
         table{border-collapse:collapse;width:100%;font-size:13px}td,th{text-align:left;border-bottom:1px solid #475569;padding:8px}
         .small{color:#cbd5e1;font-size:13px}td.empty{color:#cbd5e1;padding:24px 8px}
         .notice{background:#3b1111;color:#fecaca;border:1px solid #b91c1c;border-radius:8px;padding:10px 14px;margin:16px 0}</style>
-        <h1>Java Network Proxy — Phase 1</h1><p>Only proxy metadata is recorded. No IDS or threat classification exists yet.</p>
+        <h1>NexusGuard Proxy</h1><p>Only proxy metadata is recorded. No IDS or threat classification exists yet.</p>
         <div id="notice" class="notice" role="status" hidden></div>
         <section><h2>Connection summary</h2><div id="totals">Loading...</div></section>
         <section><h2>Recent proxied connections</h2>
