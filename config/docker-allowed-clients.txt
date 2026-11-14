@@ -1,0 +1,5 @@
+# Clients allowed through the proxy when it runs in Docker (one private IPv4 per line).
+# Docker Desktop (Windows, macOS) and requests sent from this PC arrive from the network gateway:
+172.28.0.1
+# On Docker Engine for Linux, LAN clients keep their own address. Add each one, for example:
+# 192.168.1.45

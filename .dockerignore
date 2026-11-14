@@ -1,0 +1,8 @@
+.git
+.github
+build
+data
+docs
+scripts
+src/test
+README.md
