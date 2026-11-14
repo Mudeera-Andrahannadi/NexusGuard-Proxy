@@ -4,6 +4,7 @@ import com.demo.netguard.security.ClientGuard;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpExchange;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -12,7 +13,7 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.Executors;
 
-/** Read-only, LOCALHOST-ONLY dashboard; not an authenticated network admin console. */
+/** Read-only dashboard, localhost unless told otherwise; not an authenticated network admin console. */
 public final class DashboardServer implements AutoCloseable {
     private final HttpServer server;
     private final EventLog log;
@@ -21,9 +22,17 @@ public final class DashboardServer implements AutoCloseable {
         this(port,log,null);
     }
     public DashboardServer(int port,EventLog log,ClientGuard guard) throws IOException {
+        this("127.0.0.1",port,log,guard);
+    }
+    private static final String OCTET="(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)";
+    /** The dashboard has no login, so bindIp must be a loopback or private IPv4 literal. Docker needs this: its own loopback is unreachable from the host. */
+    public DashboardServer(String bindIp,int port,EventLog log,ClientGuard guard) throws IOException {
+        if(!bindIp.matches("(?:"+OCTET+"\\.){3}"+OCTET))throw new IllegalArgumentException("Dashboard bind must be an IPv4 literal");
+        InetAddress bind=InetAddress.getByName(bindIp);
+        if(!(bind.isLoopbackAddress()||bind.isSiteLocalAddress()))throw new IllegalArgumentException("Dashboard bind must be loopback or private");
         this.log=log;
         this.guard=guard;
-        server=HttpServer.create(new InetSocketAddress("127.0.0.1",port),0);
+        server=HttpServer.create(new InetSocketAddress(bind,port),0);
         server.setExecutor(Executors.newCachedThreadPool(r->{Thread t=new Thread(r,"dashboard");t.setDaemon(true);return t;}));
         server.createContext("/api/events", e -> {
             Map<String,String> q=query(e.getRequestURI().getRawQuery());

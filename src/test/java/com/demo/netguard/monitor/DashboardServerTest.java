@@ -109,6 +109,15 @@ public final class DashboardServerTest {
             int seconds = Integer.parseInt(blocked.substring(blocked.indexOf(key) + key.length(), blocked.indexOf('}')));
             check(seconds > 85 && seconds <= 90, "blocked list reports the whole seconds left");
         }
+        for (String bad : new String[] {"0.0.0.0", "8.8.8.8", "localhost", "256.1.1.1"}) {
+            boolean rejected = false;
+            try { new DashboardServer(bad, 0, log, null).close(); } catch (IllegalArgumentException expected) { rejected = true; }
+            check(rejected, "dashboard refuses to bind to " + bad);
+        }
+        try (DashboardServer dashboard = new DashboardServer("127.0.0.1", 0, log, null)) {
+            dashboard.start();
+            check(get(http, dashboard, "/health").body().equals("ok"), "dashboard binds to an explicit loopback address");
+        }
         System.out.println("PASS: " + checks + " DashboardServer checks");
     }
 }
