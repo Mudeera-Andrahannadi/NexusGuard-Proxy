@@ -1,199 +1,302 @@
 # NexusGuard Proxy
-Team Members:
-* Dev 1 (Forward Proxy):** Vidasun Fernando
-* Dev 2 (Event Logging):** Pramith Vidanapathirana
-* Dev 3 (Dashboard & Integration): Mudeera Andrahannadi
 
-A small forward proxy written in plain Java 17. It relays HTTP and HTTPS traffic for LAN clients, writes one metadata record per connection to a JSONL file, blocks clients that flood it and plain-HTTP requests that match known attack patterns, and shows all of it on a dashboard that only listens on localhost.
+NexusGuard Proxy is a forward proxy for HTTP and HTTPS written in plain Java 17, with no third-party dependencies. It sits between the clients on a private network and the internet, and it does three jobs at once: it relays traffic, it blocks clients and requests that look hostile, and it keeps a metadata-only record of every connection that a read-only dashboard turns into something an operator can watch.
 
-This is a university networking project in two phases. Phase 1 is the proxy, the logging and the dashboard. Phase 2 adds a lightweight intrusion detection layer at the proxy: rate limiting with automatic IP blocking, and signature checks on the request. It works on request metadata only, so it is not a full intrusion detection system or a web application firewall. It is meant for an isolated lab, not for production or for the open internet.
+- **Proxying.** HTTP `GET` and `HEAD`, and HTTPS through `CONNECT` tunnels. Tunnels are never decrypted.
+- **Protection.** Per-client rate limiting with automatic, temporary IP blocks, plus signature checks for directory traversal, SQL injection, cross-site scripting and known scanner tools.
+- **Visibility.** One JSONL record per connection attempt, and a dashboard with live alerts, a blocked-clients panel and filterable history.
+- **Deployment.** Runs from source with two scripts, or in a container with `docker compose up`.
 
-## What it does
+## Contents
 
-- Proxies HTTP `GET` and `HEAD` requests, and HTTPS through `CONNECT` tunnels. The tunnel is blind: TLS is never decrypted.
-- Logs one record per connection attempt: time, client IP, method, destination host, port, protocol, outcome and a short reason. It never stores URL paths, query strings, headers, cookies or bodies.
-- Refuses destinations on internal networks (for example `169.254.169.254`), requests with bodies, mismatched or duplicate `Host` headers, and malformed requests.
-- Rate limits each client. A client that opens too many connections in a short window gets `429 Too Many Requests` and is blocked for a while, then unblocked automatically.
-- Scans each plain HTTP request for directory traversal, SQL injection, cross-site scripting and known scanner tools (`nmap`, `nikto`, `sqlmap` and others). A match gets `403` and is logged as `MALICIOUS_PATTERN_DETECTED:<kind>`. The matched text itself is never logged.
-- Serves a read-only dashboard at `http://127.0.0.1:8181`: an alert banner, threat tiles, a clients panel with a live countdown for blocked clients, recent alerts, and a connections table with client, domain, time range and result filters.
-- Ships a loopback demo website so the whole thing can be tried without touching the internet.
-- Runs in Docker with one command (see [Run with Docker Compose](#run-with-docker-compose)).
+- [How a request is handled](#how-a-request-is-handled)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Run with Docker Compose](#run-with-docker-compose)
+- [Configuration](#configuration)
+- [Detection](#detection)
+- [Dashboard](#dashboard)
+- [Event log](#event-log)
+- [Multi-client demo](#multi-client-demo)
+- [Tests](#tests)
+- [Scope and limits](#scope-and-limits)
+- [Troubleshooting](#troubleshooting)
+- [Contributors](#contributors)
+
+## How a request is handled
+
+Each connection goes through the same checks, in this order. The first one that refuses it ends the exchange.
+
+1. **Client allowlist.** In network mode, a client that is not on the allowlist gets `403` and is not logged.
+2. **Rate limit.** A client over its allowance gets `429`. The block is logged once, when it starts.
+3. **Signature scan.** The request target and `User-Agent` are checked against known attack patterns. A match gets `403`.
+4. **Request validation.** Bodies, malformed requests, and mismatched or duplicate `Host` headers are refused.
+5. **Destination policy.** Addresses on internal networks, such as the cloud metadata address `169.254.169.254`, are refused.
+6. **Relay.** The proxy connects to the destination and passes bytes in both directions.
+
+Every outcome from step 2 onward produces one log record.
 
 ## Architecture
 
 ```
- LAN client 1 ──┐                         ┌──────────────────────────────┐
-                ├── HTTP / CONNECT ─────► │  ForwardProxyServer  :8888   │ ───► destination
- LAN client 2 ──┘                         │  (checks, relays, no TLS     │      (example.com, ...)
-                                          │   inspection)                │
-                                          └──────────────┬───────────────┘
-                                                         │ FlowEvent
-                                                         ▼
-                                          ┌──────────────────────────────┐
-                                          │  EventLog                    │
-                                          │  data/proxy-events.jsonl     │
-                                          │  last 500 events in memory   │
-                                          └──────────────┬───────────────┘
-                                                         │ /api/events, /api/summary, /api/status
-                                                         ▼
-                                          ┌──────────────────────────────┐
-                              browser ──► │  DashboardServer  127.0.0.1  │
-                              (this PC)   │  :8181 (localhost only)      │
-                                          └──────────────────────────────┘
+ client 1 ──┐      ┌────────────────────────────────────────┐
+            ├─────►│ ForwardProxyServer            :8888    │ ─────► destination
+ client 2 ──┘      │   ClientGuard        rate limit        │
+                   │   SignatureScanner   attack patterns   │
+                   └────────────────────────────────────────┘
+                                       │ FlowEvent
+                                       ▼
+                   ┌────────────────────────────────────────┐
+                   │ EventLog    data/proxy-events.jsonl    │
+                   │            latest 500 kept in memory   │
+                   └────────────────────────────────────────┘
+                                       │ /api/*
+                                       ▼
+                   ┌────────────────────────────────────────┐
+    browser ──►    │ DashboardServer        127.0.0.1:8181  │
+                   └────────────────────────────────────────┘
 
-                                          LocalDemoSite  127.0.0.1:9090  (test destination)
+                   LocalDemoSite   127.0.0.1:9090   (local test destination)
 ```
 
-| Part | Where | Job |
+| Component | Package | Responsibility |
 | --- | --- | --- |
-| `NetGuardApp` | `src/main/java/com/demo/netguard/` | Starts everything, reads the command line flags and the client allowlist |
-| `ForwardProxyServer` | `.../proxy/` | Accepts clients, validates requests, relays HTTP and tunnels HTTPS |
-| `ClientGuard` | `.../security/` | Sliding-window rate limit per client IP, with automatic temporary blocks |
-| `SignatureScanner` | `.../security/` | Matches the request target and `User-Agent` against known attack patterns |
-| `FlowEvent` | `.../model/` | The record written for each connection attempt |
-| `EventLog` | `.../monitor/` | Thread-safe JSONL writer. Rotates at 1 MiB with 3 archives, and replays the latest 500 events on startup |
-| `DashboardServer` | `.../monitor/` | Read-only JSON API and the single-page viewer |
-| `LocalDemoSite` | `.../demo/` | A tiny loopback website to use as a test destination |
+| `NetGuardApp` | `com.demo.netguard` | Starts the services, reads command-line flags and the allowlist |
+| `ForwardProxyServer` | `.proxy` | Accepts clients, applies the checks above, relays HTTP and tunnels HTTPS |
+| `ClientGuard` | `.security` | Sliding-window rate limit per client IP, with timed blocks |
+| `SignatureScanner` | `.security` | Matches request targets and `User-Agent` values against attack signatures |
+| `FlowEvent` | `.model` | The record written for each connection attempt |
+| `EventLog` | `.monitor` | Thread-safe JSONL writer with size-based rotation and replay on startup |
+| `DashboardServer` | `.monitor` | Read-only JSON API and the single-page dashboard |
+| `LocalDemoSite` | `.demo` | A small loopback website used as a test destination |
 
-Ports:
+## Quick start
 
-| Port | What | Reachable from |
-| --- | --- | --- |
-| 8888 | Proxy | The address passed to `--bind` (default `127.0.0.1`) |
-| 8181 | Dashboard | This machine only (`--dashboard-bind` changes it, private addresses only) |
-| 9090 | Demo website | This machine only |
+You need JDK 17 or newer with `javac` and `java` on your `PATH`. Nothing else is required. The demo script also uses `curl`, which ships with Windows 10 and later.
 
-### Outcomes in the log
-
-`CONNECTED` means the connection to the destination opened. It does not mean the HTTP response was a success. `FAILED` means the destination could not be reached. `DENIED` means the proxy refused the request. The reason says why:
-
-| Reason | Meaning | Dashboard shows |
-| --- | --- | --- |
-| `RATE_LIMIT_EXCEEDED` | The client went over the rate limit and is now blocked | Blocked · Rate limit |
-| `MALICIOUS_PATTERN_DETECTED:DIRECTORY_TRAVERSAL` | The request target tried to climb out of the web root, such as `../../etc/passwd` | Blocked · Directory traversal |
-| `MALICIOUS_PATTERN_DETECTED:SQL_INJECTION` | The request target contained SQL injection syntax | Blocked · SQL injection |
-| `MALICIOUS_PATTERN_DETECTED:XSS` | The request target contained script injection | Blocked · Cross-site scripting |
-| `MALICIOUS_PATTERN_DETECTED:SCANNER_USER_AGENT` | The `User-Agent` names a known scanning tool | Blocked · Scanner agent |
-| anything else | A safety rule, such as an internal address or a request body | Denied · plus the rule |
-
-Blocks are logged once, when they start. Later refused requests from the same client are answered with `429` but not logged, so a flood cannot push real events out of the dashboard's history.
-
-A client whose IP is not on the allowlist gets a `403` and no log record.
-
-### Detection settings
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--max-requests <n>` | `100` | Connections one client may open within the window |
-| `--window <seconds>` | `10` | Length of the sliding window |
-| `--block <seconds>` | `60` | How long a client stays blocked once it goes over |
-| `--bind <ip>` | `127.0.0.1` | Address the proxy listens on. Loopback or a private IPv4 only, never `0.0.0.0` |
-| `--dashboard-bind <ip>` | `127.0.0.1` | Address the dashboard listens on. Same rule. The dashboard has no login, so keep it private |
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run.ps1 --max-requests 20 --window 5 --block 30
-```
+Clone and run:
 
 ```bash
-bash scripts/run.sh --max-requests 20 --window 5 --block 30
+git clone https://github.com/Mudeera-Andrahannadi/netproxy-logger.git
+cd netproxy-logger
 ```
-
-Blocks live in memory, so restarting the proxy lifts them.
-
-## Requirements
-
-- JDK 17 or newer (`javac` and `java` on your PATH). There are no other dependencies.
-- Windows PowerShell 5.1 or later, or bash on Linux and macOS.
-- `curl` for the demo script. Windows 10 and later include `curl.exe`.
-- Docker with Compose v2, only if you want the container route.
-
-## Build and run
 
 Windows (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run.ps1
 ```
 
 Linux and macOS:
 
 ```bash
-bash scripts/build.sh
 bash scripts/run.sh
 ```
 
-`run` builds first, so you can skip the separate build step. On start it prints the proxy address and the dashboard URL. Stop it with Ctrl+C.
+The scripts compile the project first, then start it. The proxy listens on `127.0.0.1:8888` and the dashboard on `http://127.0.0.1:8181`. Stop it with Ctrl+C.
 
-By default the proxy listens on `127.0.0.1` only. To let other devices on your network use it, see the demo below.
-
-### Quick check on one machine
-
-With the app running, send a request through the proxy to the demo website:
+Send a request through the proxy to the built-in demo site:
 
 ```bash
 curl -x http://127.0.0.1:8888 http://127.0.0.1:9090/
 ```
 
-Then open `http://127.0.0.1:8181`. You should see one `CONNECTED` row.
+Refresh the dashboard and you will see a `Connected` row. If nothing appears, see [`NO_PROXY`](#troubleshooting) below.
 
-If nothing shows up, check the `NO_PROXY` environment variable. Many setups list `127.0.0.1` there, and curl then skips the proxy without telling you. Clear it for the command: `NO_PROXY= curl -x ...` in bash, or `$env:NO_PROXY=''` first in PowerShell.
-
-### Try the detection
-
-These two requests are refused with `403` and show up as red rows on the dashboard:
+To see the detection work, send two requests that should be refused:
 
 ```bash
 curl --path-as-is -x http://127.0.0.1:8888 "http://127.0.0.1:9090/../../etc/passwd"
 curl -A sqlmap -x http://127.0.0.1:8888 http://127.0.0.1:9090/
 ```
 
-To trigger the rate limit, start the app with a low limit (`--max-requests 20`) and send a burst. The first 20 connections get `200`, the rest get `429`, and the clients panel shows the blocked address with a countdown:
-
-```bash
-for i in $(seq 1 30); do curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:8888 http://127.0.0.1:9090/; done
-```
-
-Restart the app to lift the block straight away.
+Both return `403` and appear as red rows on the dashboard.
 
 ## Run with Docker Compose
 
-The image builds the app from source and runs it as a non-root user on a small JRE image. It needs Docker with Compose v2 and, for the build, access to Docker Hub.
+The image compiles the application in a JDK 17 stage and runs it on a JRE 17 Alpine image as a non-root user, with a read-only root filesystem, all Linux capabilities dropped, and a health check on the dashboard.
 
 ```bash
 docker compose up --build -d
 ```
 
-Then:
+| What | Where |
+| --- | --- |
+| Dashboard | `http://127.0.0.1:8181` |
+| Proxy | `127.0.0.1:8888` |
+| Event log | The `netguard-data` volume, mounted at `/app/data` |
 
-- Dashboard: `http://127.0.0.1:8181`
-- Proxy: `127.0.0.1:8888`. Try `curl -x http://127.0.0.1:8888 http://example.com/`. The demo website is not reachable this way, because it listens on the container's own loopback, so use a real site.
-- `docker compose ps` shows `healthy` once the dashboard answers.
-- `docker compose logs -f` follows the output, and `docker compose down` stops it. The event log lives in the `netguard-data` volume and survives `down`. Use `docker compose down -v` to delete it too.
-
-The detection settings are the `command:` line in `docker-compose.yml`. Edit the numbers and run `docker compose up -d` again.
-
-### Who counts as a client in Docker
-
-The proxy only serves clients on its allowlist, and inside a container it needs that list to match the address Docker shows it. Requests sent from the Docker host itself arrive from the network gateway, `172.28.0.1`, which is why `config/docker-allowed-clients.txt` ships with that address. The compose file pins the subnet to `172.28.0.0/24` so the gateway stays the same. If the range clashes with your network, change it in `docker-compose.yml` and in the allowlist.
-
-To let other devices on your network use the proxy, publish it on this machine's LAN address, then add each device's IP to `config/docker-allowed-clients.txt`:
-
-```powershell
-$env:PROXY_HOST_IP = '192.168.1.20'; docker compose up -d
+```bash
+curl -x http://127.0.0.1:8888 http://example.com/
 ```
+
+Use a real site for this check. The demo website listens on the container's own loopback and cannot be reached from outside.
+
+Useful commands:
+
+| Command | Effect |
+| --- | --- |
+| `docker compose ps` | Shows `healthy` once the dashboard answers |
+| `docker compose logs -f` | Follows the application output |
+| `docker compose down` | Stops the stack and keeps the event log |
+| `docker compose down -v` | Stops the stack and deletes the event log |
+
+The detection settings are the `command:` line in `docker-compose.yml`. Change them and run `docker compose up -d` again.
+
+### Client addresses in Docker
+
+The proxy only serves clients on its allowlist, so inside a container the list has to match the addresses Docker presents. Requests sent from the Docker host arrive from the network gateway, `172.28.0.1`, which is what `config/docker-allowed-clients.txt` contains by default. The compose file pins the network to `172.28.0.0/24` so that address does not change. If the range collides with something on your network, change it in `docker-compose.yml` and in the allowlist.
+
+By default the proxy is published to `127.0.0.1` only. To serve other machines, publish it on this host's LAN address and add each client to the allowlist:
 
 ```bash
 PROXY_HOST_IP=192.168.1.20 docker compose up -d
 ```
 
-Docker Desktop on Windows and macOS may replace the address of outside devices with the gateway address. If it does, every device shows up as one client and shares one rate limit and one block. Docker Engine on Linux keeps the real addresses. For the two-client demo with separate client IPs, running the app directly (see below) is the reliable route.
+```powershell
+$env:PROXY_HOST_IP = '192.168.1.20'; docker compose up -d
+```
 
-The dashboard is published to `127.0.0.1` only, and it has no login. Leave it that way.
+Docker Desktop on Windows and macOS can replace the address of outside clients with the gateway address. When that happens, all of them appear as one client and share one rate limit and one block. Docker Engine on Linux preserves the real addresses. If you need distinct client addresses on Windows, run the application directly instead.
+
+The dashboard is always published to `127.0.0.1` only. It has no login.
+
+## Configuration
+
+### Command-line flags
+
+Pass flags to `scripts/run.ps1` or `scripts/run.sh`, or to the `command:` list in `docker-compose.yml`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--bind <ip>` | `127.0.0.1` | Address the proxy listens on. A loopback or private IPv4 address; `0.0.0.0` is refused |
+| `--dashboard-bind <ip>` | `127.0.0.1` | Address the dashboard listens on, under the same rule |
+| `--max-requests <n>` | `100` | Connections one client may open within the window |
+| `--window <seconds>` | `10` | Length of the sliding window |
+| `--block <seconds>` | `60` | How long a client stays blocked once it exceeds the limit |
+
+For example, a strict setting for a demo:
+
+```bash
+bash scripts/run.sh --max-requests 20 --window 5 --block 30
+```
+
+### Allowlist
+
+When `--bind` is a private network address, the proxy refuses to start unless `config/allowed-lan-clients.txt` lists at least one client. Put one private IPv4 address per line. Lines starting with `#` are comments. Any client not on the list receives `403`.
+
+On loopback the allowlist is not enforced, because only the local machine can connect.
+
+### Ports
+
+| Port | Service | Reachable from |
+| --- | --- | --- |
+| 8888 | Proxy | The address given to `--bind` |
+| 8181 | Dashboard | The address given to `--dashboard-bind`, loopback by default |
+| 9090 | Demo website | This machine only |
+
+## Detection
+
+### Rate limiting
+
+`ClientGuard` keeps a sliding window of connection times for each client IP. A client that opens more than `--max-requests` connections inside `--window` seconds is blocked for `--block` seconds. While blocked, it receives `429 Too Many Requests`. The block lifts by itself when the time is up.
+
+The block is written to the log once, when it begins. Later refused connections are answered but not logged, so a flood cannot push genuine events out of the dashboard's history.
+
+### Signature scanning
+
+`SignatureScanner` checks the request target and the `User-Agent` header of each plain HTTP request, after percent-decoding the target up to three times to catch encoded variants.
+
+| Category | What it looks for |
+| --- | --- |
+| Directory traversal | `../` and `..\` sequences, plain or encoded, and a path that ends in `/..` |
+| SQL injection | Quote-based tautologies such as `' OR 1=1`, `UNION SELECT`, `DROP TABLE`, a quote followed by `--`, and `SLEEP()`, `BENCHMARK()` or `WAITFOR DELAY` |
+| Cross-site scripting | `script`, `iframe`, `object` and `embed` tags, `javascript:` URIs, inline handlers such as `onerror=`, and `document.cookie` |
+| Scanner tools | `User-Agent` values naming `nmap`, `nikto`, `sqlmap`, `dirbuster`, `gobuster`, `masscan`, `wpscan`, `hydra`, `acunetix` or `nessus` |
+
+A match returns `403` and is logged with the category. The matched text is not logged, so an attack string cannot end up in the record.
+
+### Reason codes
+
+| Reason | Meaning | Dashboard label |
+| --- | --- | --- |
+| `RATE_LIMIT_EXCEEDED` | The client went over its allowance and is now blocked | Blocked · Rate limit |
+| `MALICIOUS_PATTERN_DETECTED:DIRECTORY_TRAVERSAL` | Path traversal in the request target | Blocked · Directory traversal |
+| `MALICIOUS_PATTERN_DETECTED:SQL_INJECTION` | SQL injection syntax in the request target | Blocked · SQL injection |
+| `MALICIOUS_PATTERN_DETECTED:XSS` | Script injection in the request target | Blocked · Cross-site scripting |
+| `MALICIOUS_PATTERN_DETECTED:SCANNER_USER_AGENT` | A known scanning tool in the `User-Agent` | Blocked · Scanner agent |
+| `DESTINATION_POLICY` and other rules | The request broke a safety rule, such as an internal destination | Denied · plus the rule |
+
+Outcomes are `CONNECTED` (the connection to the destination opened, whatever the response was), `FAILED` (the destination could not be reached) and `DENIED` (the proxy refused the request).
+
+## Dashboard
+
+The dashboard is a single page served by `DashboardServer` with no external assets. It refreshes every few seconds.
+
+- **Alert banner.** Appears when threats were blocked in the last minute or any client is currently blocked. The browser tab title carries the count.
+- **Summary tiles.** Threats blocked, clients blocked now, the most common threat, and connection totals.
+- **Clients panel.** Every client with its request and threat counts. Blocked clients show a live countdown until the block lifts.
+- **Recent alerts.** The latest blocked requests with the category and client.
+- **Connections table.** Newest first, with filters for client IP, domain, time range and result type (all, threats only, policy denials only).
+
+The tiles, panel and alerts follow the selected time range. Threat counts are computed in the browser from the latest 500 events.
+
+### API
+
+All endpoints are read-only.
+
+| Endpoint | Returns |
+| --- | --- |
+| `/api/events?client=&domain=&limit=` | Matching events as a JSON array, oldest first. `client` is an exact IP, `domain` a case-insensitive substring, `limit` defaults to 100 and is capped at 500 |
+| `/api/summary` | Counts of connected, failed and denied events among the retained ones |
+| `/api/blocked` | Clients blocked now, as `[{"ip":"...","remainingSeconds":n}]` |
+| `/api/status` | `{"storage":"ok"}` or `{"storage":"error"}`, depending on whether the log can be written |
+| `/health` | `ok` |
+
+## Event log
+
+Events are appended to `data/proxy-events.jsonl`, one JSON object per line:
+
+```json
+{"at":"2026-11-10T08:00:00Z","sourceIp":"192.0.2.10","method":"GET","destination":"example.com","port":80,"protocol":"HTTP","outcome":"CONNECTED","reason":"UPSTREAM_TCP_CONNECTED"}
+```
+
+The log holds connection metadata only: time, client IP, method, destination host and port, protocol, outcome and reason. It never stores URL paths, query strings, headers, cookies or bodies.
+
+The active file and three archives are each capped at 1 MiB, so the log keeps about 4 MiB of history. On startup the latest 500 events are loaded back into memory for the dashboard. If the log cannot be written, the dashboard shows a warning banner and keeps serving what it has in memory.
+
+## Multi-client demo
+
+This shows two devices using the proxy at the same time, each appearing as its own client. Client 1 is the machine running the proxy. Client 2 is a phone or another laptop on the same network. Some guest and campus networks stop devices from reaching each other; use a hotspot or a home router if that happens.
+
+1. **Find the addresses.** Run `ipconfig` (or `ip addr`) on the proxy machine for its private IPv4 address, `PC_IP`. Note the second device's address as `PHONE_IP`.
+2. **Allow both clients.** Add them to `config/allowed-lan-clients.txt`, one per line.
+3. **Start on the LAN address.**
+
+   ```bash
+   bash scripts/run.sh --bind PC_IP
+   ```
+
+   On Windows, allow Java through the firewall for private networks when asked. Open the dashboard on the proxy machine at `http://127.0.0.1:8181`.
+4. **Send traffic from client 1.**
+
+   ```bash
+   bash scripts/demo-traffic.sh PC_IP
+   ```
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts/demo-traffic.ps1 -Proxy PC_IP
+   ```
+
+   The script sends three requests: `http://example.com/` returns `200`, `https://example.org/` returns `200` through a tunnel, and `http://169.254.169.254/` returns `403`. The first two need internet access.
+5. **Point client 2 at the proxy.** In the device's Wi-Fi settings set a manual proxy with host `PC_IP` and port `8888`, then browse a few sites.
+6. **Read the dashboard.** Rows from both addresses appear. Filter by `PHONE_IP` to isolate the second device, or send a burst of requests from it to watch it get blocked and the countdown start.
+
+When you finish, remove the proxy setting from the device and from Windows if you set it system-wide, or that machine will lose internet access once the proxy stops.
 
 ## Tests
 
-The tests are plain Java classes with a `main` method, no test framework needed. The scripts build the project and run all six in turn:
+The tests are plain Java classes with a `main` method, so no test framework is needed. The scripts build the project and run every class:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test.ps1
@@ -205,147 +308,47 @@ bash scripts/test.sh
 
 | Class | Covers |
 | --- | --- |
-| `SmokeTest` | Proxy, tunnel, denials, logging and dashboard together on loopback |
-| `EventLogTest` | JSON escaping, replay, rotation, concurrent writes, write failures |
-| `DashboardServerTest` | Filter parsing, `/api/status`, `/api/blocked`, the bind-address rules, and the alert and filter text the page ships with |
-| `ForwardProxyServerTest` | Request validation, allowlist, limits and malformed input |
-| `ClientGuardTest` | Rate limit window, automatic block and unblock on a fake clock, concurrent requests, and a real proxy answering `429` |
-| `SignatureScannerTest` | Directory traversal, SQL injection, XSS and scanner `User-Agent` matches, encoded variants, and ordinary requests that must pass |
+| `SmokeTest` | Proxy, tunnel, denials, logging and dashboard working together on loopback |
+| `ForwardProxyServerTest` | Request validation, allowlist, size limits and malformed input |
+| `ClientGuardTest` | Rate window, blocking and unblocking on a fake clock, concurrency, and a real proxy answering `429` |
+| `SignatureScannerTest` | Each attack category, encoded variants, and ordinary requests that must pass |
+| `EventLogTest` | JSON escaping, replay, rotation, concurrent writes and write failures |
+| `DashboardServerTest` | Query parsing, the API endpoints, bind-address rules and the page contract |
 
-Run the scripts from anywhere: they switch to the repository root first, which `EventLogTest` needs because it reads `docs/examples/synthetic-proxy-events.jsonl`. On Windows use `test.ps1`; `test.sh` is meant for Linux and CI because of how Java reads the classpath there.
+Run the scripts from any directory. They switch to the repository root first, because `EventLogTest` reads `docs/examples/synthetic-proxy-events.jsonl`. On Windows use `test.ps1`: `test.sh` passes a `:` classpath separator, which Windows Java does not accept.
 
-The time range filter, the "Show" filter and the block countdown are JavaScript in the page, so these tests only check that the page ships them. Check them by hand in a browser.
+The dashboard's filters and countdown are JavaScript in the page, so the tests only check that the page ships them. Check them by hand in a browser.
 
 GitHub Actions runs `scripts/test.sh` on every push to `main`, `dev` and `feature/**`, and on pull requests into `dev` and `main`.
 
-## Two-client demo
+## Scope and limits
 
-This shows two different devices using the proxy at the same time, each appearing as its own client on the dashboard. Client 1 is the computer running the proxy. Client 2 is a phone or a second laptop on the same Wi-Fi.
+NexusGuard is built for networks you control. Please keep these in mind before deploying it.
 
-Only use this on a network you control. Some campus or guest Wi-Fi networks block devices from talking to each other. If the phone cannot reach your computer, use a phone hotspot or a home router instead.
-
-### 1. Find the two addresses
-
-- Proxy computer: run `ipconfig` and note the IPv4 address of your Wi-Fi or Ethernet adapter. Call it `PC_IP`.
-- Second device: open its Wi-Fi settings and note its IP address. Call it `PHONE_IP`.
-
-Both must be private addresses (for example `192.168.x.x`, `10.x.x.x` or `172.16-31.x.x`).
-
-### 2. Allow the clients
-
-Put both addresses in `config/allowed-lan-clients.txt`, one per line:
-
-```
-192.168.1.20
-192.168.1.45
-```
-
-The proxy refuses to start on a network address with an empty list, and it answers `403` to any client not on it. If the phone's address is wrong, its requests are rejected silently and nothing appears on the dashboard.
-
-### 3. Start the proxy on the LAN address
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run.ps1 --bind 192.168.1.20
-```
-
-```bash
-bash scripts/run.sh --bind 192.168.1.20
-```
-
-Use your own `PC_IP`. Windows Firewall may ask whether Java can use the network. Allow it on private networks. Never bind to `0.0.0.0` or expose the port to the internet.
-
-Then open `http://127.0.0.1:8181` on the proxy computer. The dashboard is not reachable from other devices on purpose.
-
-For clean screenshots, stop the app first and delete `data/proxy-events.jsonl` before starting it again. The file is not tracked by git.
-
-### 4. Client 1: send traffic from the proxy computer
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/demo-traffic.ps1 -Proxy 192.168.1.20
-```
-
-```bash
-bash scripts/demo-traffic.sh 192.168.1.20
-```
-
-The script sends three requests and prints the status code for each:
-
-| Request | Expected |
-| --- | --- |
-| `http://example.com/` | `200`, logged as `GET` with outcome `CONNECTED` |
-| `https://example.org/` | `200`, logged as `CONNECT` (`HTTPS_TUNNEL`) with outcome `CONNECTED` |
-| `http://169.254.169.254/` | `403`, logged with outcome `DENIED` |
-
-It needs internet access, since the first two go to real sites.
-
-### 5. Client 2: point the phone at the proxy
-
-In the phone's Wi-Fi settings for this network, set the proxy to Manual, host `PC_IP`, port `8888`. Then browse to `http://example.com`, `http://neverssl.com` and `https://example.org`. A browser on the phone will also make some background requests, so expect a few extra rows.
-
-### 6. What to look for on the dashboard
-
-- Rows from both `PC_IP` and `PHONE_IP` in the table.
-- Type `PHONE_IP` into Client IP to see only the phone's traffic.
-- Type `example` into Domain to narrow by destination.
-- Pick Last 5 minutes in Time range to hide older entries.
-- The `DENIED` row from the blocked request.
-- Type something that matches nothing to see the "Nothing matches these filters" message.
-- Set Show to Threats only to see just the blocked requests, or Policy denials only for the rest.
-
-### 7. Clean up
-
-Press Ctrl+C in the proxy window, turn the proxy off in the phone's Wi-Fi settings, and put the allowlist back so you do not commit your own IP addresses:
-
-```bash
-git checkout config/allowed-lan-clients.txt
-```
-
-If you set a system-wide proxy in Windows to use this one, turn it off too. Otherwise the computer loses internet access when the proxy stops.
-
-## Dashboard API
-
-All endpoints are read-only and answer on `127.0.0.1:8181`.
-
-| Endpoint | Returns |
-| --- | --- |
-| `/api/events?client=&domain=&limit=` | Matching events as a JSON array, oldest first. `client` is an exact IP, `domain` is a case-insensitive substring, `limit` defaults to 100 and is capped at 500 |
-| `/api/summary` | Counts of connected, failed and denied events among the retained ones |
-| `/api/status` | `{"storage":"ok"}` or `{"storage":"error"}` depending on whether the log can be written |
-| `/api/blocked` | Clients blocked right now, as `[{"ip":"...","remainingSeconds":n}]`. `[]` when nobody is blocked |
-| `/health` | `ok` |
-
-The dashboard shows the latest 500 events. The time range filter and the threat counts work on those, in the browser, so older threats drop out of the tiles once 500 newer events have arrived.
-
-## Repository layout
-
-```
-src/main/java/com/demo/netguard/   application code
-src/test/java/com/demo/netguard/   the six test classes
-scripts/                           build, run, test and demo-traffic (.ps1 and .sh)
-config/allowed-lan-clients.txt     client allowlist for LAN mode
-config/docker-allowed-clients.txt  client allowlist used by Docker Compose
-Dockerfile, docker-compose.yml     container build and run
-docs/examples/                     synthetic events used by EventLogTest
-data/                              runtime log (not tracked)
-```
-
-## Limits
-
-- Only `GET`, `HEAD` and `CONNECT`. Requests with a body, such as `POST`, are rejected.
-- No TLS inspection, no authentication, no per-user identity. The client IP is the address the proxy saw, nothing more.
-- Rotation keeps about 4 MiB of log history in total. Older records are discarded.
-- If the log cannot be written, the dashboard shows a warning banner, but the proxy itself does not report it.
-- The signature checks look at the request target and the `User-Agent` of plain HTTP requests. For HTTPS, the tunnel is blind, so only the `User-Agent` of the `CONNECT` request is visible. This is pattern matching, not a web application firewall, and it will miss anything it has no pattern for.
-- Rate limit blocks are kept in memory and there is no unblock button, because the dashboard is read-only. Restarting the proxy clears them.
-- Built for a lab. It has not been hardened for hostile networks.
+- The proxy handles `GET`, `HEAD` and `CONNECT`. Requests with a body, such as `POST`, are rejected.
+- HTTPS is tunnelled without inspection. For those connections the scanner only sees the `User-Agent` of the `CONNECT` request, never the path.
+- Signature scanning is pattern matching on the request line and one header. It is not a web application firewall, and it will miss attacks it has no pattern for.
+- There is no authentication and no per-user identity. A client is the IP address the proxy saw.
+- Blocks are held in memory, so restarting the proxy lifts them. The dashboard is read-only and has no unblock control.
+- The dashboard has no login. Keep it on loopback, or on a private interface that only administrators can reach.
+- The proxy refuses to bind to `0.0.0.0`. Do not expose it to the internet.
 
 ## Troubleshooting
 
-- `ForwardProxyServerTest` fails at "duplicate Host header is rejected" on some Windows machines. Something on the machine removes the second `Host` header before Java sees it. The proxy rejects it correctly when it does arrive.
-- A request does not appear on the dashboard. Check `NO_PROXY` (see above), that the client IP is on the allowlist in LAN mode, and that the client really uses port 8888.
-- `scripts/test.sh` cannot find a class on Windows. Use `test.ps1`. The shell script uses a `:` classpath separator, which Windows Java does not accept.
+**A request does not show up on the dashboard.** Check the `NO_PROXY` environment variable first. Many setups list `127.0.0.1` there, and curl then skips the proxy without saying so. Clear it for the command: `NO_PROXY= curl -x ...` in bash, or `$env:NO_PROXY=''` first in PowerShell. Then confirm the client really uses port 8888 and, in network mode, that its address is on the allowlist.
 
+**The proxy will not start on a network address.** The allowlist is empty or contains an address that is not a private IPv4 literal. Fix `config/allowed-lan-clients.txt`.
 
-## contributers
-- FERNANDO A.N.V. EG/2023/5590
+**A client gets `429`.** It went over `--max-requests` within `--window` seconds. The dashboard shows how long the block has left. Raise the limit, or restart the proxy to lift the block immediately.
 
+**`scripts/test.sh` cannot find a class on Windows.** Use `scripts/test.ps1` instead.
+
+**`docker compose up` fails because the subnet is in use.** Change `172.28.0.0/24` in `docker-compose.yml`, and update the gateway address in `config/docker-allowed-clients.txt` to match.
+
+## Contributors
+
+| | Name | Role |
+| --- | --- | --- |
+| Dev 1 | Vidasun Fernando | Forward proxy |
+| Dev 2 | Pramith Vidanapathirana | Event logging |
+| Dev 3 | Mudeera Andrahannadi | Dashboard, integration, security layer and deployment |
