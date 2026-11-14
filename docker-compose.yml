@@ -1,0 +1,31 @@
+services:
+  netguard:
+    build: .
+    image: nexusguard-proxy
+    container_name: nexusguard-proxy
+    restart: unless-stopped
+    command: ["--max-requests", "100", "--window", "10", "--block", "60"]
+    ports:
+      # Proxy: host-only by default. For LAN clients set PROXY_HOST_IP to this PC's LAN address.
+      - "${PROXY_HOST_IP:-127.0.0.1}:8888:8888"
+      # Dashboard has no login: never publish it beyond localhost.
+      - "127.0.0.1:8181:8181"
+    volumes:
+      - netguard-data:/app/data
+      # The app only accepts allowlisted clients; see the file for what Docker shows as the client IP.
+      - ./config/docker-allowed-clients.txt:/app/config/allowed-lan-clients.txt:ro
+    networks: [netguard]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  netguard-data:
+
+networks:
+  netguard:
+    ipam:
+      config:
+        # Fixed range so the gateway address in the allowlist stays the same. Change both if it clashes.
+        - subnet: 172.28.0.0/24

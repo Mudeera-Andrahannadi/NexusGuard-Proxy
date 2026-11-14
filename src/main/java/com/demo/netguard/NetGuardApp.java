@@ -3,6 +3,8 @@ package com.demo.netguard;
 import com.demo.netguard.demo.LocalDemoSite;
 import com.demo.netguard.monitor.*;
 import com.demo.netguard.proxy.ForwardProxyServer;
+import com.demo.netguard.security.ClientGuard;
+import com.demo.netguard.security.SignatureScanner;
 import java.nio.file.*;
 import java.util.*;
 
@@ -14,10 +16,20 @@ public final class NetGuardApp implements AutoCloseable {
     private final DashboardServer dashboard;
     public NetGuardApp(int proxyPort,int dashboardPort,int mockPort,Path events,
                        String bindIp,Set<String> allowlist) throws Exception {
+        this(proxyPort,dashboardPort,mockPort,events,bindIp,allowlist,null,null);
+    }
+    /** A null guard turns rate limiting off; a null scanner turns signature checks off. */
+    public NetGuardApp(int proxyPort,int dashboardPort,int mockPort,Path events,
+                       String bindIp,Set<String> allowlist,ClientGuard guard,SignatureScanner scanner) throws Exception {
+        this(proxyPort,dashboardPort,mockPort,events,bindIp,allowlist,guard,scanner,"127.0.0.1");
+    }
+    public NetGuardApp(int proxyPort,int dashboardPort,int mockPort,Path events,
+                       String bindIp,Set<String> allowlist,ClientGuard guard,SignatureScanner scanner,
+                       String dashboardBind) throws Exception {
         log=new EventLog(events);
         mock=new LocalDemoSite(mockPort);
-        proxy=new ForwardProxyServer(proxyPort,bindIp,allowlist,log,mock.port());
-        dashboard=new DashboardServer(dashboardPort,log);
+        proxy=new ForwardProxyServer(proxyPort,bindIp,allowlist,log,mock.port(),guard,scanner);
+        dashboard=new DashboardServer(dashboardBind,dashboardPort,log,guard);
     }
     public void start(){mock.start();proxy.start();dashboard.start();}
     public int proxyPort(){return proxy.port();}
@@ -26,20 +38,28 @@ public final class NetGuardApp implements AutoCloseable {
     public EventLog events(){return log;}
     @Override public void close(){dashboard.close();proxy.close();mock.close();}
     public static void main(String[] args) throws Exception {
-        String bindIp="127.0.0.1";
+        String bindIp="127.0.0.1",dashboardBind="127.0.0.1";
+        int maxRequests=100,windowSeconds=10,blockSeconds=60;
         for(int i=0;i<args.length;i++) {
             if(args[i].equals("--bind") && i+1<args.length)bindIp=args[++i];
-            else throw new IllegalArgumentException("Usage: --bind <explicit-private-IPv4-address> (optional)");
+            else if(args[i].equals("--dashboard-bind") && i+1<args.length)dashboardBind=args[++i];
+            else if(args[i].equals("--max-requests") && i+1<args.length)maxRequests=Integer.parseInt(args[++i]);
+            else if(args[i].equals("--window") && i+1<args.length)windowSeconds=Integer.parseInt(args[++i]);
+            else if(args[i].equals("--block") && i+1<args.length)blockSeconds=Integer.parseInt(args[++i]);
+            else throw new IllegalArgumentException("Usage: [--bind <private-IPv4>] [--dashboard-bind <private-IPv4>] [--max-requests <n>] [--window <seconds>] [--block <seconds>]");
         }
+        ClientGuard guard=new ClientGuard(maxRequests,windowSeconds*1000L,blockSeconds*1000L);
         Set<String> allowed=new HashSet<>();
         Path list=Path.of("config/allowed-lan-clients.txt");
         if(Files.exists(list))for(String item:Files.readAllLines(list)){
             item=item.strip();if(!item.isBlank()&&!item.startsWith("#"))allowed.add(item);
         }
-        try(var app=new NetGuardApp(8888,8181,9090,Path.of("data/proxy-events.jsonl"),bindIp,allowed)){
+        try(var app=new NetGuardApp(8888,8181,9090,Path.of("data/proxy-events.jsonl"),bindIp,allowed,guard,new SignatureScanner(),dashboardBind)){
             app.start();
             System.out.println("Proxy listening: "+bindIp+":"+app.proxyPort());
-            System.out.println("Local-only dashboard: http://127.0.0.1:"+app.dashboardPort());
+            System.out.println("Rate limit: "+maxRequests+" connections per "+windowSeconds+"s per client, then blocked for "+blockSeconds+"s");
+            System.out.println("Signature checks: directory traversal, SQL injection, XSS, scanner User-Agents");
+            System.out.println("Dashboard (no login, keep it private): http://"+dashboardBind+":"+app.dashboardPort());
             System.out.println("Local-only demo destination: http://127.0.0.1:"+app.demoPort());
             System.out.println("Configure a browser/curl HTTP(S) explicit proxy. Ctrl+C to stop.");
             Thread.currentThread().join();
